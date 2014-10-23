@@ -1,8 +1,12 @@
 #!/bin/python
 
 from rv_parser import *
+import asyncore, socket
+import threading
 
 FILENAME = "/home/mininet/netassay/pyretic/modules/netassay/me/bgp/bgpclassifier/part_of_oix-full-snapshot-2014-06-01-0200"
+
+
 
 # Perhaps this should just be a class that's inherited from... 
 # If so, would need to get rid of the data sources and seperate out the callback
@@ -12,10 +16,34 @@ class BGPQueryHandler:
         # callback dictionaries
         self.as_callbacks = {}
         self.in_path_callbacks = {}
+        
 
         # data source - This is for testing and the like...
         self.data = RVData()
-        self.data.parse_file(FILENAME, 10000)
+        #self.data.parse_file(FILENAME, 10000)
+        self.data.parse_db()
+
+       
+ #may want to enhance this with a pre-load file to prepopulate the DB
+        self.db = {}                   # dictionary of DNSClassifierEntrys
+        self.new_callbacks = []        # For each new entry
+        self.update_callbacks = []     # For each time an entry is updated
+        self.all_callbacks = []        # When entry is updated or new
+        self.class_callbacks = {}      # Dictionary of lists of callbacks per
+                                       # classification
+
+
+    def set_new_AS_rule(self, msg):
+        for callback in self.new_callbacks:
+            callback(msg)
+
+    def set_new_callback(self, cb):
+        if cb not in self.new_callbacks:
+            self.new_callbacks.append(cb)
+
+    def remove_new_callback(self, cb):
+        self.new_callbacks.remove(cb)
+  
 
 
     def query_from_AS(self, asnum):
@@ -25,6 +53,7 @@ class BGPQueryHandler:
             paths.append(entry.network)
 
         return paths
+
 
     def query_in_path(self, asnum):
         ases = self.data.get_all_in_AS_path(asnum)

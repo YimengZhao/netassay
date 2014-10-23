@@ -1,10 +1,61 @@
 #!/bin/python
 
 import sys
+import mysql.connector
+from mysql.connector import errorcode
 
 class RVData:
     def __init__(self):
         self.entries = []
+
+
+
+    def parse_db(self):
+        Tables = {}
+
+        Tables['AS_RECORD'] = (
+            "CREATE TABLE `AS_RECORD` ("
+            "`as_no` int(11) NOT NULL AUTO_INCREMENT,"
+            "`network` CHAR(100) NOT NULL,"
+            "`next_hop` CHAR(100) NOT NULL,"
+            "`path` CHAR(255) NOT NULL,"
+            " PRIMARY KEY (`as_no`)"
+            ") ENGINE=InnoDB")
+
+        db = mysql.connector.connect(user='root')
+        cursor = db.cursor()
+        
+        try:
+            db.database = "NETASSAY_DB" 
+        except mysql.connector.Error as err:
+            if err.errno == errorcode.ER_BAD_DB_ERROR:
+                sql = 'CREATE DATABASE NETASSAY_DB'
+                cursor.execute(sql)
+                db.database = "NETASSAY_DB"
+            else:
+                print(err)
+
+        for name, ddl in Tables.iteritems():
+            try:
+                cursor.execute(ddl)
+            except mysql.connector.Error as err: 
+                if err.errno == errorcode.ER_TABLE_EXISTS_ERROR:
+                    print("already exists")
+                else:
+                    print(err)
+
+        sql = ("SELECT network, next_hop, path from AS_RECORD")
+        cursor.execute(sql)
+        
+        for (network, next_hop, path) in cursor:
+            print network
+            rv = RVLine()
+            rv.network = network
+            rv.nexthop = next_hop
+            rv.aspath = path.split()
+            self.entries.append(rv)
+
+        db.close()  
 
     def parse_file(self, file, num_entries = None):
         # skip over lines that start with something other than *
@@ -39,9 +90,11 @@ class RVData:
     def get_all_in_AS_path(self, asnum):
         entries_from_AS = []
         for entry in self.entries:
-            if entry.get_in_path(asnum):
+            if entry.get_in_path(asnum):              
                 entries_from_AS.append(entry)
         return entries_from_AS
+
+
         
 
 class RVLine:

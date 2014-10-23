@@ -7,28 +7,32 @@ import logging
 from bgpqueries import BGPQueryHandler as BGPHandler
 from pyretic.modules.netassay.assayrule import *
 from pyretic.modules.netassay.netassaymatch import *
+from pyretic.modules.netassay.me.metadataengine import *
 from pyretic.lib.corelib import *
 from pyretic.lib.std import *
 from pyretic.lib.query import *
+import threading
+import asyncore, socket
 
-
+        
 class BGPMetadataEngineException(Exception):
     pass
 
-class BGPMetadataEngine:
+class BGPMetadataEngine(MetadataEngine):
     INSTANCE = None        
     # Singleton! should be initialized by the MCM only!
     
     def __init__(self):
-        if self.INSTANCE is not None:
-            raise ValueError("Instance already exists!")
-        self.bgp_source = BGPHandler()
-        self.entries = []
-        self.logger = logging.getLogger('netassay.BGPME')
-
+        super(BGPMetadataEngine, self).__init__(BGPHandler(),BGPMetadataEntry)
+        
         # Register the different actions this ME can handle
         RegisteredMatchActions.register('AS', matchAS)
         RegisteredMatchActions.register('ASPath', matchASPath)
+
+        #start listening database editor request
+        s = Server('', 8080)
+        server_thread = threading.Thread(target=asyncore.loop)
+        server_thread.start()
 
         self.logger.debug("BGPMetadataEngine.__init__(): finished")
 
@@ -46,20 +50,17 @@ class BGPMetadataEngine:
         self.logger.info("BGPMetadataEngine.get_forwarding_rules(): called")
 
         return identity
+ 
 
-    def new_rule(self, rule):
-        self.logger.info("BGPMetadataEngine.new_rule(): called")
-        self.entries.append(BGPMetadataEntry(self.bgp_source, self, rule))
+    def update(self,msg):
+        self.logger.info("DNSMetadataEngine.update(): called")
+        self.data_source.set_new_AS_rule(msg)
+        #self.data_source.print_entries()
+     
 
-    
-
-class BGPMetadataEntry:
+class BGPMetadataEntry(MetadataEntry):
     def __init__(self, bgp_source, engine, rule ):
-        logging.getLogger('netassay.BGPMetadataEntry').info("BGPMetadataEntry.__init__(): called")
-        self.bgp_source = bgp_source
-        self.engine = engine
-        self.rule = rule
-        self.logger = logging.getLogger('netassay.BGPMetadataEntry')
+        super(BGPMetadataEntry, self).__init__(bgp_source, engine, rule)
         
         #register for all the callbacks necessary
         if self.rule.type == AssayRule.AS:
@@ -71,25 +72,88 @@ class BGPMetadataEntry:
                 self.handle_AS_callback,
                 str(self.rule.value))
 
+        self.data_source.set_new_callback(self.handle_AS_callback)
+
         #setup based on initial BGP data
         if self.rule.type == AssayRule.AS:
-            new_prefixes = self.bgp_source.query_from_AS(self.rule.value)
+            new_prefixes = bgp_source.query_from_AS(self.rule.value)
             for prefix in new_prefixes:
+                self.logger.info("prefix: " + prefix)
                 self.rule.add_rule_group(Match(dict(srcip=IPPrefix(prefix))))
                 self.rule.add_rule_group(Match(dict(dstip=IPPrefix(prefix))))
         elif self.rule.type == AssayRule.AS_IN_PATH:
-            new_prefixes = self.bgp_source.query_in_path(self.rule.value)
+            new_prefixes = bgp_source.query_in_path(self.rule.value)
             for prefix in new_prefixes:
+                self.logger.info("as in path prefix: " + prefix)
                 self.rule.add_rule_group(Match(dict(srcip=IPPrefix(prefix))))
                 self.rule.add_rule_group(Match(dict(dstip=IPPrefix(prefix))))
 
         #TODO: need to handle withdrawals!
 
-    def handle_AS_callback(self, prefix):
-        self.logger.info("BGPMetatdataEntry.handle_AS_callback(): called with prfix " + prefix)
-        self.rule.add_rule_group(Match(dict(srcip=IPPrefix(prefix))))
-        self.rule.add_rule(Match(dict(dstip=IPPrefix(prefix))))
 
+    def handle_AS_callback(self, msg):
+        '''
+        this handles new AS rules sent from database editor
+        '''
+
+        self.logger.info("DNSMetadataEngine.handle_AS_callback(): called")
+        msg_array = msg.split('##')
+        if len(msg_array)  == 2:
+            action = msg_array[0]
+            prefix_array = msg_array[1].split('&&')
+
+            #add new rules
+            if action == "ADD":
+                for prefix in prefix_array:
+                    self.logger.info("BGPMetatdataEntry.handle_AS_callback(): called with prfix: " + prefix + " action: " + action)
+
+                    tmp_array = prefix.split('@@')
+                    network = tmp_array[0]
+                    aspath = tmp_array[1].split()
+                    if aspath[-1] == self.rule.value:
+                        print "test"
+                        self.rule.add_rule_group(Match(dict(srcip=IPPrefix(network))))
+                        self.rule.add_rule(Match(dict(dstip=IPPrefix(network))))
+            #delete existing rules
+            elif action == "DELETE":
+                for prefix in prefix_array:
+                    self.logger.info("BGPMetatdataEntry.handle_AS_callback(): called with prfix: " + prefix + " action: " + action)
+
+                    tmp_array = prefix.split('@@')
+                    network = tmp_array[0]
+                    aspath = tmp_array[1].split()
+
+                    if aspath[-1] == self.rule.value:
+                        self.rule.remove_rule_group(Match(dict(srcip=IPPrefix(network))))
+                        self.rule.remove_rule(Match(dict(dstip=IPPrefix(network))))  
+            #update existing rules
+            elif action == "UPDATE":
+
+                if len(prefix_array)==2:
+                    old_prefix = prefix_array[0]
+                    new_prefix = prefix_array[1]
+
+                    tmp_array = old_prefix.split('@@')
+                    old_network = tmp_array[0]
+                    old_aspath = tmp_array[1].split()
+                    if old_aspath[-1] == self.rule.value:
+
+                        self.rule.remove_rule_group(Match(dict(srcip=IPPrefix(old_network))))
+                        self.rule.remove_rule(Match(dict(dstip=IPPrefix(old_network))))
+
+                    tmp_array = new_prefix.split('@@')
+                    new_network = tmp_array[0]
+                    new_aspath = tmp_array[1].split()
+                    if new_aspath[-1] == self.rule.value:
+
+                        self.rule.add_rule_group(Match(dict(srcip=IPPrefix(new_network))))
+                        self.rule.add_rule(Match(dict(dstip=IPPrefix(new_network))))
+
+                else:
+                    return
+
+
+   
 
 #--------------------------------------
 # NetAssayMatch subclasses
@@ -116,3 +180,37 @@ class matchASPath(NetAssayMatch):
         ruletype = AssayRule.AS_IN_PATH
         rulevalue = asnum
         super(matchASPath, self).__init__(metadata_engine, ruletype, rulevalue, matchaction)
+
+#-----------------------------------------------
+# Server Class: receive msg from database editor
+#----------------------------------------------
+class Server(asyncore.dispatcher):
+    def __init__(self, host, port):
+        asyncore.dispatcher.__init__(self)
+        self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.bind(('', port))
+        self.listen(1)
+
+    def handle_accept(self):
+        # when we get a client connection start a dispatcher for that
+        # client
+        socket, address = self.accept()
+        print 'Connection by', address
+        EventHandler(socket)
+
+    def handle_close(self):
+        print "Connection closed"
+        self.close()
+
+class EventHandler(asyncore.dispatcher_with_send):
+ 
+    def handle_read(self):
+        msg = self.recv(8192)
+        if not msg:
+            return
+
+        print "receive msg: ",msg
+        bgp = BGPMetadataEngine.get_instance()
+        bgp.update(msg)
+        if msg:
+            self.send(msg)
